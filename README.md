@@ -5,7 +5,6 @@ YouTube Audio Cut Bot is a Telegram bot that allows users to download audio from
 ### How to Use the Bot
 
 1. **Start the Bot**: Open Telegram and start a chat with your bot. Use the command `/start` to initiate the bot.
->>>>>>> 216242dbe96bef5092f6121c47bf1491190d38d9
 
 2. **Send YouTube Link**: Send a message containing the YouTube video link you want to download and split. The bot will start downloading the audio from the video.
 
