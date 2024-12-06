@@ -1,10 +1,18 @@
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 216242dbe96bef5092f6121c47bf1491190d38d9
 ## YouTube Audio Cut Bot
 
 YouTube Audio Cut Bot is a Telegram bot that allows users to download audio from YouTube videos and split it into 10-minute segments. These audio segments can be played on smartwatches, such as the Huawei Watch GT 4. This bot uses `aiogram`, `yt-dlp`, and `pydub` libraries to provide a seamless experience.
 
 ### How to Use the Bot
 
+<<<<<<< HEAD
+1. **Start the Bot**: Open Telegram, find  and start a chat with your bot. Use the command `/start` to initiate the bot.
+=======
 1. **Start the Bot**: Open Telegram and start a chat with your bot. Use the command `/start` to initiate the bot.
+>>>>>>> 216242dbe96bef5092f6121c47bf1491190d38d9
 
 2. **Send YouTube Link**: Send a message containing the YouTube video link you want to download and split. The bot will start downloading the audio from the video.
 
@@ -50,4 +58,12 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ### Contact
 
+<<<<<<< HEAD
+If you have any questions or suggestions, feel free to contact me at Telegram @yauheniSkud
+
+=======
+# youtubeAudioCutBot
+>>>>>>> e5eac4f5dc155843b605925d563b40db2ee8440e
+=======
 If you have any questions or suggestions, feel free to contact me at your_email@example.com.
+>>>>>>> 216242dbe96bef5092f6121c47bf1491190d38d9
