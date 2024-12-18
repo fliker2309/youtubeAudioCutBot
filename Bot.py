@@ -19,7 +19,7 @@ dp = Dispatcher()
 # Очередь для хранения ссылок на видео
 video_queue = deque()
 processing = False
-current_speed = 1.0  # Глобальная переменная для хранения текущей скорости воспроизведения
+current_speed = 1.5  # Глобальная переменная для хранения текущей скорости воспроизведения
 
 executor = ThreadPoolExecutor(max_workers=2)
 
@@ -42,7 +42,7 @@ def sanitize_filename(filename):
     return re.sub(r'[\\/*?:"<>|]', "", filename)
 
 def change_speed(audio, speed=1.0):
-    return audio.set_frame_rate(int(audio.frame_rate * speed))
+    return audio.speedup(playback_speed=speed, chunk_size=150, crossfade=25)
 
 @dp.message(Command("start"))
 async def send_welcome(message: Message):
