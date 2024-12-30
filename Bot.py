@@ -8,7 +8,6 @@ from pydub import AudioSegment
 import re
 
 TOKEN = '7828398845:AAFhNph7fQ6HkrCcCzSMWz8G6tmgRBA4VAk'
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -37,11 +36,11 @@ def download_audio(video_url, sanitized_title):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': f'{sanitized_title}',  # Используем очищенное название
+        'outtmpl': f'{sanitized_title}.%(ext)s',  # Используем очищенное название
         'keepvideo': True,  # Не сохраняем исходный файл
         'progress_hooks': [progress_hook],
     }
-    
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(video_url, download=True)
         return sanitized_title, ydl.prepare_filename(info_dict)
@@ -91,12 +90,18 @@ async def process_video(video_url, chat_id):
     finally:
         # Удаляем временные файлы
         if os.path.exists(mp3_file):
-            os.remove(mp3_file)
+            os.remove(mp3_file)  # Удаляем исходный видеофайл (если он был скачан)
 
         # Дополнительно удалить файлы сегментов, если они остались
         for file_name in os.listdir():
             if file_name.startswith(f"{sanitized_title}") and file_name.endswith(".mp3"):
                 os.remove(file_name)
+
+        # Проверяем, есть ли еще видео в очереди
+        if not task_queue.empty():
+            await bot.send_message(chat_id, "Начинаю обработку следующего видео...")
+        else:
+            await bot.send_message(chat_id, "Очередь пуста. Ожидаю новые задания.")
 
 
 @dp.message(Command("start"))
