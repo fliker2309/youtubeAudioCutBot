@@ -3,7 +3,7 @@ import yt_dlp
 import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, ReplyKeyboardMarkup, KeyboardButton
 from pydub import AudioSegment
 import re
 
@@ -46,7 +46,7 @@ def download_audio(video_url, sanitized_title):
         return sanitized_title, ydl.prepare_filename(info_dict)
 
 
-async def process_video(video_url, chat_id):
+async def process_video(video_url, chat_id, original_message_id):
     """Обрабатывает одно видео: скачивает, режет на сегменты и отправляет пользователю."""
     try:
         # Получаем информацию о видео
@@ -82,7 +82,12 @@ async def process_video(video_url, chat_id):
             # Удаляем отправленный сегмент
             os.remove(segment_name)
 
-        await bot.send_message(chat_id, f"Обработка видео '{sanitized_title}' завершена.")
+        # Отправляем сообщение о завершении обработки в ответ на исходное
+        await bot.send_message(
+            chat_id,
+            f"Обработка видео '{sanitized_title}' завершена.",
+            reply_to_message_id=original_message_id
+        )
 
     except Exception as e:
         await bot.send_message(chat_id, f"Ошибка: {e}")
@@ -113,14 +118,15 @@ async def send_welcome(message: Message):
 async def handle_text(message: Message):
     url = message.text.strip()
     await message.reply("Добавляю видео в очередь на обработку...")
-    await task_queue.put((url, message.chat.id))
+    # Добавляем ссылку в очередь и сохраняем ID исходного сообщения
+    await task_queue.put((url, message.chat.id, message.message_id))
 
 
 async def task_worker():
     """Фоновая задача для обработки видео из очереди."""
     while True:
-        video_url, chat_id = await task_queue.get()
-        await process_video(video_url, chat_id)
+        video_url, chat_id, original_message_id = await task_queue.get()
+        await process_video(video_url, chat_id, original_message_id)
         task_queue.task_done()
 
 
