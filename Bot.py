@@ -7,14 +7,19 @@ from aiogram.types import Message, FSInputFile
 from pydub import AudioSegment
 import re
 
-TOKEN = 'your_token'
+TOKEN = '7828398845:AAFhNph7fQ6HkrCcCzSMWz8G6tmgRBA4VAk'
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # Очередь задач
 task_queue = asyncio.Queue()
 
-def download_audio(video_url, output_path):
+def sanitize_filename(filename):
+    """Удаляет или заменяет недопустимые символы из имени файла."""
+    return re.sub(r'[\\/*?:"<>|/]', "-", filename)  # Заменим все запрещенные символы на дефис
+
+def download_audio(video_url, sanitized_title):
     """Скачивает аудио из видео и сохраняет его в указанный файл с прогрессом."""
     def progress_hook(d):
         if d['status'] == 'downloading':
@@ -24,6 +29,7 @@ def download_audio(video_url, output_path):
                 progress = downloaded / total * 100
                 print(f"Downloading... {progress:.2f}%")
 
+    # Используем sanitized_title для имени файла
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -31,39 +37,35 @@ def download_audio(video_url, output_path):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': '%(title)s',  # Используем название видео для имени файла
-        'keepvideo': False,  # Не сохраняем исходный файл
+        'outtmpl': f'{sanitized_title}',  # Используем очищенное название
+        'keepvideo': True,  # Не сохраняем исходный файл
         'progress_hooks': [progress_hook],
     }
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(video_url, download=True)
-        return info_dict.get('title', None)
-
-
-def sanitize_filename(filename):
-    """Удаляет недопустимые символы из имени файла."""
-    return re.sub(r'[\\/*?:"<>|]', "", filename)
+        return sanitized_title, ydl.prepare_filename(info_dict)
 
 
 async def process_video(video_url, chat_id):
     """Обрабатывает одно видео: скачивает, режет на сегменты и отправляет пользователю."""
     try:
-        # Скачиваем аудио с названием видео
-        video_title = download_audio(video_url, "%(title)s.mp3")
-        if not video_title:
-            await bot.send_message(chat_id, "Ошибка при скачивании видео.")
-            return
+        # Получаем информацию о видео
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            info_dict = ydl.extract_info(video_url, download=False)
+            original_title = info_dict.get('title', '')
 
-        sanitized_title = sanitize_filename(video_title)  # Убираем недопустимые символы из названия
-        mp3_file = f"{sanitized_title}.mp3"
+        # Очищаем название видео
+        sanitized_title = sanitize_filename(original_title)
+
+        # Скачиваем аудио с новым названием файла
+        _, mp3_file = download_audio(video_url, sanitized_title)
 
         # Конвертируем и сохраняем файл
         audio = AudioSegment.from_file(mp3_file)
-        audio.export(mp3_file, format="mp3")
 
         # Разбиваем на сегменты и отправляем
         segment_length = 10 * 60 * 1000  # 10 минут в миллисекундах
-        audio = AudioSegment.from_file(mp3_file)
         segments = len(audio) // segment_length + (1 if len(audio) % segment_length > 0 else 0)
 
         for i in range(segments):
