@@ -7,7 +7,7 @@ from aiogram.types import Message, FSInputFile
 from pydub import AudioSegment
 import re
 
-TOKEN = '7828398845:AAFhNph7fQ6HkrCcCzSMWz8G6tmgRBA4VAk'
+TOKEN = 'your_token'
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
