@@ -3,7 +3,7 @@ import yt_dlp
 import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, FSInputFile
 from pydub import AudioSegment
 import re
 
@@ -26,9 +26,8 @@ def download_audio(video_url, sanitized_title):
             total = d.get('total_bytes', None)
             if total:
                 progress = downloaded / total * 100
-                print(f"Downloading... {progress:.2f}%")
+                print(f"Загрузка... {progress:.2f}%")
 
-    # Используем sanitized_title для имени файла
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -37,17 +36,16 @@ def download_audio(video_url, sanitized_title):
             'preferredquality': '192',
         }],
         'outtmpl': f'{sanitized_title}.%(ext)s',  # Используем очищенное название
-        'keepvideo': True,  # Не сохраняем исходный файл
-        'progress_hooks': [progress_hook],
+        'keepvideo': True   
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(video_url, download=True)
         return sanitized_title, ydl.prepare_filename(info_dict)
 
-
 async def process_video(video_url, chat_id, original_message_id):
     """Обрабатывает одно видео: скачивает, режет на сегменты и отправляет пользователю."""
+    mp3_file = None  # Инициализируем переменную заранее
     try:
         # Получаем информацию о видео
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
@@ -82,7 +80,6 @@ async def process_video(video_url, chat_id, original_message_id):
             # Удаляем отправленный сегмент
             os.remove(segment_name)
 
-        # Отправляем сообщение о завершении обработки в ответ на исходное
         await bot.send_message(
             chat_id,
             f"Обработка видео '{sanitized_title}' завершена.",
@@ -93,26 +90,21 @@ async def process_video(video_url, chat_id, original_message_id):
         await bot.send_message(chat_id, f"Ошибка: {e}")
 
     finally:
-        # Удаляем временные файлы
-        if os.path.exists(mp3_file):
-            os.remove(mp3_file)  # Удаляем исходный видеофайл (если он был скачан)
+        # Удаление исходного файла только после завершения всех задач
+        if mp3_file and os.path.exists(mp3_file):
+            os.remove(mp3_file)
 
-        # Дополнительно удалить файлы сегментов, если они остались
+  # Удаление видео после завершения обработки
+        if os.path.exists(f"{sanitized_title}.webm"):
+            os.remove(f"{sanitized_title}.webm")
+        # Дополнительно удаляем сегменты, если они остались
         for file_name in os.listdir():
-            if file_name.startswith(f"{sanitized_title}") and file_name.endswith(".mp3"):
+            if file_name.startswith(sanitized_title) and file_name.endswith(".mp3"):
                 os.remove(file_name)
-
-        # Проверяем, есть ли еще видео в очереди
-        if not task_queue.empty():
-            await bot.send_message(chat_id, "Начинаю обработку следующего видео...")
-        else:
-            await bot.send_message(chat_id, "Очередь пуста. Ожидаю новые задания.")
-
 
 @dp.message(Command("start"))
 async def send_welcome(message: Message):
     await message.reply("Привет! Отправь мне ссылку на YouTube видео, и я обработаю его аудио для тебя.")
-
 
 @dp.message(lambda message: 'youtube.com' in message.text or 'youtu.be' in message.text)
 async def handle_text(message: Message):
@@ -121,17 +113,22 @@ async def handle_text(message: Message):
     # Добавляем ссылку в очередь и сохраняем ID исходного сообщения
     await task_queue.put((url, message.chat.id, message.message_id))
 
-
 async def task_worker():
     """Фоновая задача для обработки видео из очереди."""
     while True:
         video_url, chat_id, original_message_id = await task_queue.get()
-        await process_video(video_url, chat_id, original_message_id)
-        task_queue.task_done()
+        try:
+            await process_video(video_url, chat_id, original_message_id)
+        except Exception as e:
+            await bot.send_message(chat_id, f"Ошибка обработки очереди: {e}")
+        finally:
+            task_queue.task_done()
 
+async def main():
+    # Запускаем обработчик задач
+    asyncio.create_task(task_worker())
+    # Запускаем polling
+    await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    loop.create_task(task_worker())
-    loop.create_task(dp.start_polling(bot, skip_updates=True))
-    loop.run_forever()
+    asyncio.run(main())
