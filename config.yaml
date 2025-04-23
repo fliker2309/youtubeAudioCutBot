@@ -1,4 +1,4 @@
-telegram_token: "your_token"
+telegram_token: "token"
 segment_length_ms: 600000
 speed_options:
   - 1.0
