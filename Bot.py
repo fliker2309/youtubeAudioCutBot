@@ -1,133 +1,179 @@
 import os
-import yt_dlp
-import asyncio
-from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile
-from pydub import AudioSegment
 import re
+import asyncio
+import math
+import subprocess
+from pathlib import Path
+from collections import deque
+import yaml
 
-TOKEN = '7828398845:AAFhNph7fQ6HkrCcCzSMWz8G6tmgRBA4VAk'
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import FSInputFile
+import yt_dlp
+
+# --- Конфиг ---
+config_path = Path(__file__).parent / "config.yaml"
+with open(config_path, encoding="utf-8") as f:
+    cfg = yaml.safe_load(f)
+
+TOKEN = cfg["telegram_token"]
+SEGMENT_MS = cfg.get("segment_length_ms", 10 * 60 * 1000)
+SEGMENT_S = SEGMENT_MS // 1000
+SPEED_OPTIONS = cfg.get("speed_options", [1.0, 1.25, 1.5, 1.75, 2.0])
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Очередь задач
-task_queue = asyncio.Queue()
+# Очередь задач и отложенные ссылки (url, message_id)
+task_queue: asyncio.Queue[tuple[str, int, int, float]] = asyncio.Queue()
+pending_videos: dict[int, deque[tuple[str, int]]] = {}
 
-def sanitize_filename(filename):
-    """Удаляет или заменяет недопустимые символы из имени файла."""
-    return re.sub(r'[\\/*?:"<>|/]', "-", filename)  # Заменим все запрещенные символы на дефис
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[\\/*?:<>|"]', "-", name)
 
-def download_audio(video_url, sanitized_title):
-    """Скачивает аудио из видео и сохраняет его в указанный файл с прогрессом."""
-    def progress_hook(d):
-        if d['status'] == 'downloading':
-            downloaded = d.get('downloaded_bytes', 0)
-            total = d.get('total_bytes', None)
-            if total:
-                progress = downloaded / total * 100
-                print(f"Загрузка... {progress:.2f}%")
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'outtmpl': f'{sanitized_title}.%(ext)s',  # Используем очищенное название
-        'keepvideo': True   
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(video_url, download=True)
-        return sanitized_title, ydl.prepare_filename(info_dict)
-
-async def process_video(video_url, chat_id, original_message_id):
-    """Обрабатывает одно видео: скачивает, режет на сегменты и отправляет пользователю."""
-    mp3_file = None  # Инициализируем переменную заранее
-    try:
-        # Получаем информацию о видео
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            info_dict = ydl.extract_info(video_url, download=False)
-            original_title = info_dict.get('title', '')
-
-        # Очищаем название видео
-        sanitized_title = sanitize_filename(original_title)
-
-        # Скачиваем аудио с новым названием файла
-        _, mp3_file = download_audio(video_url, sanitized_title)
-
-        # Конвертируем и сохраняем файл
-        audio = AudioSegment.from_file(mp3_file)
-
-        # Разбиваем на сегменты и отправляем
-        segment_length = 10 * 60 * 1000  # 10 минут в миллисекундах
-        segments = len(audio) // segment_length + (1 if len(audio) % segment_length > 0 else 0)
-
-        for i in range(segments):
-            start = i * segment_length
-            end = start + segment_length if start + segment_length < len(audio) else len(audio)
-            segment = audio[start:end]
-
-            segment_name = f"{i + 1:02}_{sanitized_title}.mp3"
-            segment.export(segment_name, format="mp3")
-
-            audio_file = FSInputFile(segment_name)
-            await bot.send_audio(chat_id, audio_file)
-            await bot.send_message(chat_id, f"Отправлен сегмент {i + 1} из {segments}")
-
-            # Удаляем отправленный сегмент
-            os.remove(segment_name)
-
-        await bot.send_message(
-            chat_id,
-            f"Обработка видео '{sanitized_title}' завершена.",
-            reply_to_message_id=original_message_id
-        )
-
-    except Exception as e:
-        await bot.send_message(chat_id, f"Ошибка: {e}")
-
-    finally:
-        # Удаление исходного файла только после завершения всех задач
-        if mp3_file and os.path.exists(mp3_file):
-            os.remove(mp3_file)
-
-  # Удаление видео после завершения обработки
-        if os.path.exists(f"{sanitized_title}.webm"):
-            os.remove(f"{sanitized_title}.webm")
-        # Дополнительно удаляем сегменты, если они остались
-        for file_name in os.listdir():
-            if file_name.startswith(sanitized_title) and file_name.endswith(".mp3"):
-                os.remove(file_name)
+def speed_keyboard() -> types.InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for i, speed in enumerate(SPEED_OPTIONS, start=1):
+        btn = types.InlineKeyboardButton(text=f"{speed}×",
+                                         callback_data=f"speed:{speed}")
+        row.append(btn)
+        if i % 2 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 @dp.message(Command("start"))
-async def send_welcome(message: Message):
-    await message.reply("Привет! Отправь мне ссылку на YouTube видео, и я обработаю его аудио для тебя.")
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "Привет! Пришли ссылку на YouTube, выбери скорость — "
+        "я поставлю задачу в очередь."
+    )
 
-@dp.message(lambda message: 'youtube.com' in message.text or 'youtu.be' in message.text)
-async def handle_text(message: Message):
-    url = message.text.strip()
-    await message.reply("Добавляю видео в очередь на обработку...")
-    # Добавляем ссылку в очередь и сохраняем ID исходного сообщения
-    await task_queue.put((url, message.chat.id, message.message_id))
+@dp.message(lambda m: 'youtube.com' in m.text or 'youtu.be' in m.text)
+async def handle_link(message: types.Message):
+    dq = pending_videos.setdefault(message.chat.id, deque())
+    dq.append((message.text.strip(), message.message_id))
+    await message.answer(
+        f"Ссылка #{len(dq)} в очереди. Выбери скорость:",
+        reply_markup=speed_keyboard()
+    )
+
+@dp.callback_query(lambda c: c.data.startswith("speed:"))
+async def handle_speed(cb: types.CallbackQuery):
+    chat_id = cb.message.chat.id
+    dq = pending_videos.get(chat_id)
+    if not dq:
+        await cb.answer("Сначала отправь ссылку.", show_alert=True)
+        return
+
+    speed = float(cb.data.split(":", 1)[1])
+    url, orig_msg_id = dq.popleft()
+    await task_queue.put((url, chat_id, orig_msg_id, speed))
+    await cb.message.answer(
+        f"Задача на скорость {speed}× принята. "
+        f"До тебя в очереди {task_queue.qsize()-1} видео."
+    )
+    await cb.answer()
 
 async def task_worker():
-    """Фоновая задача для обработки видео из очереди."""
     while True:
-        video_url, chat_id, original_message_id = await task_queue.get()
+        url, chat_id, orig_msg_id, speed = await task_queue.get()
+
+        # 1) Форвардим оригинал
+        await bot.forward_message(chat_id, chat_id, orig_msg_id)
+        # 2) Сообщаем, что начинаем
+        await bot.send_message(chat_id, "Начинаю обработку...")
+
         try:
-            await process_video(video_url, chat_id, original_message_id)
+            await process_video(url, chat_id, orig_msg_id, speed)
         except Exception as e:
-            await bot.send_message(chat_id, f"Ошибка обработки очереди: {e}")
+            await bot.send_message(chat_id, f"Ошибка: {e}")
         finally:
             task_queue.task_done()
 
+
+async def process_video(
+    video_url: str,
+    chat_id: int,
+    orig_msg_id: int,
+    speed: float
+):
+    loop = asyncio.get_event_loop()
+
+    # 1) Скачиваем аудио
+    def blocking_download():
+        opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': 'input.%(ext)s',
+            'quiet': True
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            title = info.get('title', 'audio')
+            safe_title = sanitize_filename(title)
+            path = ydl.prepare_filename(info)
+            return path, safe_title
+
+    input_file, title_safe = await loop.run_in_executor(None, blocking_download)
+
+    # 2) Узнаём длительность
+    def ffprobe_duration(path: str) -> float:
+        cmd = [
+            'ffprobe','-v','error',
+            '-show_entries','format=duration',
+            '-of','default=noprint_wrappers=1:nokey=1', path
+        ]
+        out = subprocess.check_output(cmd)
+        return float(out)
+
+    duration = await loop.run_in_executor(None, ffprobe_duration, input_file)
+
+    # 3) Готовим параметры для сегментации
+    # Входной сегмент = SEGMENT_S * speed, чтобы выход после atempo был SEGMENT_S
+    segment_in_s = SEGMENT_S * speed
+    total_segments = math.ceil(duration / segment_in_s)
+
+    # atempo-фильтр
+    def atempo_filter(s: float) -> str:
+        parts = []
+        rem = s
+        while rem > 2.0:
+            parts.append('atempo=2.0')
+            rem /= 2.0
+        parts.append(f'atempo={rem:.2f}')
+        return ','.join(parts)
+
+    filter_str = atempo_filter(speed)
+
+    # 4) Разбиваем и отправляем
+    for i in range(total_segments):
+        start = i * segment_in_s
+        out_name = f"{i+1:02}__{title_safe}.mp3"
+        cmd = [
+            'ffmpeg','-y',
+            '-ss', str(start),
+            '-t', str(segment_in_s),
+            '-i', input_file,
+            '-filter:a', filter_str,
+            out_name
+        ]
+        await loop.run_in_executor(None, lambda: subprocess.run(cmd, check=True))
+        await bot.send_audio(chat_id, FSInputFile(out_name))
+        await bot.send_message(chat_id, f"Сегмент {i+1}/{total_segments} отправлен")
+        os.remove(out_name)
+
+    os.remove(input_file)
+
+    # 5) Пересылаем оригинал и сообщаем «Готово»
+    await bot.forward_message(chat_id, chat_id, orig_msg_id)
+    await bot.send_message(chat_id, "Готово!")
+
 async def main():
-    # Запускаем обработчик задач
     asyncio.create_task(task_worker())
-    # Запускаем polling
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == '__main__':
