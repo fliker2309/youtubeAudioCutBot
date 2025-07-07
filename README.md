@@ -1,51 +1,82 @@
-## YouTube Audio Cut Bot
+# YouTube Audio Cut Bot 🎧🤖
 
-YouTube Audio Cut Bot is a Telegram bot that allows users to download audio from YouTube videos and split it into 10-minute segments. These audio segments can be played on smartwatches, such as the Huawei Watch GT 4. This bot uses `aiogram`, `yt-dlp`, and `pydub` libraries to provide a seamless experience.
+A Telegram bot that downloads audio from YouTube videos, speeds it up on request, and splits it into compact segments — perfect for listening on smartwatches like the Huawei Watch GT 4. Built with `aiogram`, `yt-dlp`, and `ffmpeg`.
 
-### How to Use the Bot
+## 🚀 Features
 
-1. **Start the Bot**: Open Telegram and start a chat with your bot. Use the command `/start` to initiate the bot.
+- 📥 Download YouTube audio by simply sending a video link
+- ⚡ Select playback speed (1.0×, 1.25×, ..., 2.0×)
+- 🪓 Auto-split into segments (default 10 minutes per segment)
+- 📤 Receive segmented `.mp3` files in chat
+- 🧠 Asynchronous task queue with progress updates
+- ✅ Smart file naming and sanitization
 
-2. **Send YouTube Link**: Send a message containing the YouTube video link you want to download and split. The bot will start downloading the audio from the video.
+---
 
-3. **Processing**: The bot will notify you when it starts downloading the audio and when it begins processing the audio into segments.
+## 📦 Installation
 
-4. **Receive Segments**: Once the processing is complete, the bot will send you the audio segments in 10-minute intervals. These segments can be played on your smartwatch or any other device.
+1. **Clone the repo**:
+   ```bash
+   git clone https://github.com/fliker2309/youtubeAudioCutBot.git
+   cd youtubeAudioCutBot
+   ```
 
-### Example Commands
+2. **Install requirements**:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-- `/start` - Initiate the bot and receive a welcome message.
-- Send a YouTube link - The bot will download and process the audio.
+3. **Install FFmpeg**  
+   Make sure `ffmpeg` and `ffprobe` are available in your system `PATH`.
 
-### Installation
+4. **Create `config.yaml`**:
+   ```yaml
+   telegram_token: "YOUR_BOT_TOKEN"
+   segment_length_ms: 600000           # Optional (default: 10 minutes)
+   speed_options: [1.0, 1.25, 1.5, 1.75, 2.0]  # Optional
+   ```
 
-1. Clone the repository:
-    ```sh
-    git clone https://github.com/fliker2309/youtubeAudioCutBot.git
-    cd youtubeAudioCutBot
-    ```
+---
 
-2. Install the required dependencies:
-    ```sh
-    pip install -r requirements.txt
-    ```
+## 🧠 Usage
 
-3. Create a `.env` file and add your bot token:
-    ```env
-    TOKEN=your_bot_token
-    ```
+1. **Run the bot**:
+   ```bash
+   python bot.py
+   ```
 
-### Running the Bot
+2. **In Telegram**:
+   - Send `/start` to the bot
+   - Paste a YouTube URL
+   - Choose speed from the inline buttons
+   - Wait for `.mp3` segments to arrive
 
-1. Start the bot:
-    ```sh
-    python bot.py
-    ```
+---
 
-2. Open Telegram and interact with your bot using the commands mentioned above.
+## ⚙️ Tech Stack
 
-### License
+- Python 3.10+
+- [aiogram 3.x](https://docs.aiogram.dev/)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- [FFmpeg](https://ffmpeg.org/)
+- YAML for config parsing
+- Logging to `bot.log`
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+---
 
+## 💡 Planned Enhancements
 
+- Download queue persistence across restarts
+- Audio normalization and tagging
+- Optional transcription or auto summaries
+- Web-based dashboard (?)
+
+---
+
+## 📄 License
+
+MIT — free to use, modify, and redistribute.
+
+---
+
+> Made with 💡 by [@fliker2309](https://github.com/fliker2309)
