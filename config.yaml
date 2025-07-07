@@ -1,8 +1,0 @@
-telegram_token: "7828398845:AAFhNph7fQ6HkrCcCzSMWz8G6tmgRBA4VAk"
-segment_length_ms: 600000
-speed_options:
-  - 1.0
-  - 1.25
-  - 1.5
-  - 1.75
-  - 2.0
