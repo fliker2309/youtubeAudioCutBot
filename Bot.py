@@ -9,6 +9,7 @@ import yaml
 import logging
 from concurrent.futures import ThreadPoolExecutor
 import time
+import threading
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -37,17 +38,38 @@ SPEED_OPTIONS = cfg.get("speed_options", [1.0, 1.25, 1.5, 1.75, 2.0])
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=4)  # Возвращаем к стандартному значению
 
 task_queue: asyncio.Queue[tuple[str, int, int, float]] = asyncio.Queue(maxsize=10)
 pending_videos: dict[int, deque[tuple[str, int, int]]] = {}
 progress_data: dict[int, tuple[float, int]] = {}
 message_ids: dict[int, list[int]] = {}
+active_tasks_lock = threading.Lock()
 active_tasks: int = 0
 
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:<>|\"]', "-", name)
+
+
+def cleanup_temp_files():
+    """Очищает временные файлы yt-dlp"""
+    import glob
+    temp_patterns = [
+        'input_*.mp4',
+        'input_*.webm', 
+        'input_*.m4a',
+        'input_*.part*',
+        'input_*.frag*'
+    ]
+    for pattern in temp_patterns:
+        for file_path in glob.glob(pattern):
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info(f"Удален временный файл: {file_path}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить временный файл {file_path}: {e}")
 
 
 def speed_keyboard() -> types.InlineKeyboardMarkup:
@@ -94,7 +116,8 @@ async def handle_speed(cb: types.CallbackQuery):
     url, orig_msg_id, speed_msg_id = dq.popleft()
     try:
         await task_queue.put((url, chat_id, orig_msg_id, speed))
-        total_tasks = task_queue.qsize() - 1 + active_tasks
+        with active_tasks_lock:
+            total_tasks = task_queue.qsize() - 1 + active_tasks
         await cb.message.answer(f"Задача на {speed}× принята. До тебя в очереди {total_tasks} видео.")
         try:
             await bot.delete_message(chat_id=chat_id, message_id=speed_msg_id)
@@ -137,20 +160,50 @@ async def task_worker():
     global active_tasks
     while True:
         url, chat_id, orig_msg_id, speed = await task_queue.get()
-        active_tasks += 1
-        await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=orig_msg_id)
+        with active_tasks_lock:
+            active_tasks += 1
+        
+        # Отправляем сообщение о начале обработки
         start_msg = await bot.send_message(chat_id=chat_id, text="Начинаю обработку...")
         message_ids[chat_id] = [start_msg.message_id]
+        
         try:
+            # Пересылаем оригинальное сообщение
+            await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=orig_msg_id)
+            
+            # Обрабатываем видео
             await process_video(url, chat_id, orig_msg_id, speed)
+            
         except Exception as e:
-            await bot.send_message(chat_id=chat_id, text=f"Ошибка: {e}")
-            logger.error(f"Ошибка: {e}")
+            error_msg = f"❌ Ошибка при обработке видео:\n{str(e)}"
+            await bot.send_message(chat_id=chat_id, text=error_msg)
+            logger.error(f"Ошибка обработки видео {url}: {e}")
+            
+            # Удаляем сообщение "Начинаю обработку"
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=start_msg.message_id)
+            except:
+                pass
+                
         finally:
             task_queue.task_done()
-            active_tasks -= 1
+            with active_tasks_lock:
+                active_tasks -= 1
             progress_data.pop(chat_id, None)
             message_ids.pop(chat_id, None)
+
+
+def process_segment(input_file: str, start: float, duration: float, filter_str: str, output_file: str):
+    """Обработка одного сегмента аудио"""
+    cmd = [
+        'ffmpeg', '-y', '-ss', str(start), '-t', str(duration),
+        '-i', input_file, '-filter:a', filter_str, output_file
+    ]
+    try:
+        return subprocess.run(cmd, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+    except UnicodeDecodeError:
+        # Если UTF-8 не работает, используем бинарный режим
+        return subprocess.run(cmd, check=True, capture_output=True)
 
 
 async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: float):
@@ -158,26 +211,55 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
     progress_data[chat_id] = (-10, None)
 
     def blocking_download():
-        opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': 'input.%(ext)s',
-            'quiet': True,
-            'no-playlist': True,
-            'progress_hooks': [lambda d: download_progress_hook(d, chat_id, loop)]
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            title = info.get('title', 'audio')
-            safe_title = sanitize_filename(title)
-            path = ydl.prepare_filename(info)
-            return path, safe_title
+        try:
+            # Создаем уникальное имя файла для каждого процесса
+            import uuid
+            unique_id = str(uuid.uuid4())[:8]
+            filename_template = f'input_{unique_id}.%(ext)s'
+            
+            opts = {
+                'format': 'bestaudio/best',  # Возвращаем лучшее качество
+                'outtmpl': filename_template,
+                'quiet': True,
+                'no-playlist': True,
+                'progress_hooks': [lambda d: download_progress_hook(d, chat_id, loop)],
+                'noprogress': True,  # Отключаем прогресс-бар yt-dlp
+                'retries': 5,  # Увеличиваем количество попыток
+                'fragment_retries': 5,  # Попытки для фрагментов
+                'file_access_retries': 5,  # Попытки доступа к файлу
+                'sleep_interval': 1,  # Пауза между попытками
+                'max_sleep_interval': 5,  # Максимальная пауза
+                'ignoreerrors': False,  # Не игнорируем ошибки
+                'no_warnings': False,  # Показываем предупреждения
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                if not info:
+                    raise Exception("Не удалось получить информацию о видео")
+                title = info.get('title', 'audio')
+                safe_title = sanitize_filename(title)
+                path = ydl.prepare_filename(info)
+                if not path or not os.path.exists(path):
+                    raise Exception("Файл не был загружен")
+                return path, safe_title
+        except Exception as e:
+            logger.error(f"Ошибка загрузки видео {video_url}: {e}")
+            raise Exception(f"Не удалось загрузить видео: {e}")
+        except UnicodeDecodeError as e:
+            logger.error(f"Ошибка кодировки при загрузке видео {video_url}: {e}")
+            raise Exception(f"Ошибка кодировки при загрузке видео: {e}")
 
     input_file, title_safe = await loop.run_in_executor(executor, blocking_download)
 
     def get_duration(path: str) -> float:
         cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
                '-of', 'default=noprint_wrappers=1:nokey=1', path]
-        return float(subprocess.check_output(cmd))
+        try:
+            return float(subprocess.check_output(cmd, encoding='utf-8', errors='ignore'))
+        except UnicodeDecodeError:
+            # Если UTF-8 не работает, используем бинарный режим
+            result = subprocess.check_output(cmd)
+            return float(result.decode('utf-8', errors='ignore').strip())
 
     duration = await loop.run_in_executor(executor, lambda: get_duration(input_file))
     segment_in_s = SEGMENT_S * speed
@@ -198,19 +280,36 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
         start = i * segment_in_s
         segment_num = f"{i+1:02d}"
         out_name = f"{segment_num}__{title_safe}.mp3"
-        cmd = [
-            'ffmpeg', '-y', '-ss', str(start), '-t', str(segment_in_s),
-            '-i', input_file, '-filter:a', filter_str, out_name
-        ]
-        await loop.run_in_executor(executor, lambda: subprocess.run(cmd, check=True))
-        await bot.send_audio(chat_id=chat_id, audio=FSInputFile(out_name))
-        seg_msg = await bot.send_message(chat_id=chat_id, text=f"Сегмент {i+1}/{total_segments} отправлен")
-        message_ids[chat_id].append(seg_msg.message_id)
-        if os.path.exists(out_name):
-            try:
-                os.remove(out_name)
-            except Exception as e:
-                logger.error(f"Не удалось удалить сегмент {out_name}: {e}")
+        
+        # Исправляем проблему с lambda - создаем отдельную функцию
+        try:
+            await loop.run_in_executor(
+                executor, 
+                process_segment, 
+                input_file, 
+                start, 
+                segment_in_s, 
+                filter_str, 
+                out_name
+            )
+            await bot.send_audio(chat_id=chat_id, audio=FSInputFile(out_name))
+            seg_msg = await bot.send_message(chat_id=chat_id, text=f"Сегмент {i+1}/{total_segments} отправлен")
+            message_ids[chat_id].append(seg_msg.message_id)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Ошибка обработки сегмента {i+1}: {e}")
+            await bot.send_message(chat_id=chat_id, text=f"Ошибка обработки сегмента {i+1}")
+            continue
+        except UnicodeDecodeError as e:
+            logger.error(f"Ошибка кодировки при обработке сегмента {i+1}: {e}")
+            await bot.send_message(chat_id=chat_id, text=f"Ошибка кодировки при обработке сегмента {i+1}")
+            continue
+        finally:
+            # Удаляем файл сегмента
+            if os.path.exists(out_name):
+                try:
+                    os.remove(out_name)
+                except Exception as e:
+                    logger.error(f"Не удалось удалить сегмент {out_name}: {e}")
 
     # Удаляем исходный файл
     if os.path.exists(input_file):
@@ -218,6 +317,9 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
             os.remove(input_file)
         except Exception as e:
             logger.error(f"Не удалось удалить файл {input_file}: {e}")
+    
+    # Очищаем временные файлы yt-dlp
+    cleanup_temp_files()
 
     await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=orig_msg_id)
     await bot.send_message(chat_id=chat_id, text="Готово!")
@@ -235,9 +337,35 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
             logger.error(f"Ошибка удаления сообщения {msg_id}: {e}")
 
 
+def check_dependencies():
+    """Проверяет наличие необходимых системных зависимостей"""
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, encoding='utf-8', errors='ignore')
+        subprocess.run(['ffprobe', '-version'], capture_output=True, check=True, encoding='utf-8', errors='ignore')
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        raise RuntimeError("ffmpeg и ffprobe должны быть установлены в системе")
+
+
+
+
+
 async def main():
+    # Проверяем зависимости
+    check_dependencies()
+    
+    # Очищаем старые временные файлы при запуске
+    cleanup_temp_files()
+    
+    # Создаем один воркер для последовательной обработки
     asyncio.create_task(task_worker())
-    await dp.start_polling(bot, skip_updates=True)
+    
+    try:
+        await dp.start_polling(bot, skip_updates=True)
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал прерывания...")
+        # Очищаем временные файлы при завершении
+        cleanup_temp_files()
+        logger.info("Бот остановлен")
 
 
 if __name__ == '__main__':
