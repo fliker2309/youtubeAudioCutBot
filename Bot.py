@@ -9,6 +9,7 @@ import yaml
 import logging
 from concurrent.futures import ThreadPoolExecutor
 import time
+import threading
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -43,6 +44,7 @@ task_queue: asyncio.Queue[tuple[str, int, int, float]] = asyncio.Queue(maxsize=1
 pending_videos: dict[int, deque[tuple[str, int, int]]] = {}
 progress_data: dict[int, tuple[float, int]] = {}
 message_ids: dict[int, list[int]] = {}
+active_tasks_lock = threading.Lock()
 active_tasks: int = 0
 
 
@@ -94,7 +96,8 @@ async def handle_speed(cb: types.CallbackQuery):
     url, orig_msg_id, speed_msg_id = dq.popleft()
     try:
         await task_queue.put((url, chat_id, orig_msg_id, speed))
-        total_tasks = task_queue.qsize() - 1 + active_tasks
+        with active_tasks_lock:
+            total_tasks = task_queue.qsize() - 1 + active_tasks
         await cb.message.answer(f"Задача на {speed}× принята. До тебя в очереди {total_tasks} видео.")
         try:
             await bot.delete_message(chat_id=chat_id, message_id=speed_msg_id)
@@ -137,7 +140,8 @@ async def task_worker():
     global active_tasks
     while True:
         url, chat_id, orig_msg_id, speed = await task_queue.get()
-        active_tasks += 1
+        with active_tasks_lock:
+            active_tasks += 1
         await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=orig_msg_id)
         start_msg = await bot.send_message(chat_id=chat_id, text="Начинаю обработку...")
         message_ids[chat_id] = [start_msg.message_id]
@@ -148,9 +152,19 @@ async def task_worker():
             logger.error(f"Ошибка: {e}")
         finally:
             task_queue.task_done()
-            active_tasks -= 1
+            with active_tasks_lock:
+                active_tasks -= 1
             progress_data.pop(chat_id, None)
             message_ids.pop(chat_id, None)
+
+
+def process_segment(input_file: str, start: float, duration: float, filter_str: str, output_file: str):
+    """Обработка одного сегмента аудио"""
+    cmd = [
+        'ffmpeg', '-y', '-ss', str(start), '-t', str(duration),
+        '-i', input_file, '-filter:a', filter_str, output_file
+    ]
+    return subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
 async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: float):
@@ -158,19 +172,23 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
     progress_data[chat_id] = (-10, None)
 
     def blocking_download():
-        opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': 'input.%(ext)s',
-            'quiet': True,
-            'no-playlist': True,
-            'progress_hooks': [lambda d: download_progress_hook(d, chat_id, loop)]
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            title = info.get('title', 'audio')
-            safe_title = sanitize_filename(title)
-            path = ydl.prepare_filename(info)
-            return path, safe_title
+        try:
+            opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': 'input.%(ext)s',
+                'quiet': True,
+                'no-playlist': True,
+                'progress_hooks': [lambda d: download_progress_hook(d, chat_id, loop)]
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                title = info.get('title', 'audio')
+                safe_title = sanitize_filename(title)
+                path = ydl.prepare_filename(info)
+                return path, safe_title
+        except Exception as e:
+            logger.error(f"Ошибка загрузки видео {video_url}: {e}")
+            raise Exception(f"Не удалось загрузить видео: {e}")
 
     input_file, title_safe = await loop.run_in_executor(executor, blocking_download)
 
@@ -198,19 +216,32 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
         start = i * segment_in_s
         segment_num = f"{i+1:02d}"
         out_name = f"{segment_num}__{title_safe}.mp3"
-        cmd = [
-            'ffmpeg', '-y', '-ss', str(start), '-t', str(segment_in_s),
-            '-i', input_file, '-filter:a', filter_str, out_name
-        ]
-        await loop.run_in_executor(executor, lambda: subprocess.run(cmd, check=True))
-        await bot.send_audio(chat_id=chat_id, audio=FSInputFile(out_name))
-        seg_msg = await bot.send_message(chat_id=chat_id, text=f"Сегмент {i+1}/{total_segments} отправлен")
-        message_ids[chat_id].append(seg_msg.message_id)
-        if os.path.exists(out_name):
-            try:
-                os.remove(out_name)
-            except Exception as e:
-                logger.error(f"Не удалось удалить сегмент {out_name}: {e}")
+        
+        # Исправляем проблему с lambda - создаем отдельную функцию
+        try:
+            await loop.run_in_executor(
+                executor, 
+                process_segment, 
+                input_file, 
+                start, 
+                segment_in_s, 
+                filter_str, 
+                out_name
+            )
+            await bot.send_audio(chat_id=chat_id, audio=FSInputFile(out_name))
+            seg_msg = await bot.send_message(chat_id=chat_id, text=f"Сегмент {i+1}/{total_segments} отправлен")
+            message_ids[chat_id].append(seg_msg.message_id)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Ошибка обработки сегмента {i+1}: {e}")
+            await bot.send_message(chat_id=chat_id, text=f"Ошибка обработки сегмента {i+1}")
+            continue
+        finally:
+            # Удаляем файл сегмента
+            if os.path.exists(out_name):
+                try:
+                    os.remove(out_name)
+                except Exception as e:
+                    logger.error(f"Не удалось удалить сегмент {out_name}: {e}")
 
     # Удаляем исходный файл
     if os.path.exists(input_file):
@@ -235,7 +266,19 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
             logger.error(f"Ошибка удаления сообщения {msg_id}: {e}")
 
 
+def check_dependencies():
+    """Проверяет наличие необходимых системных зависимостей"""
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        subprocess.run(['ffprobe', '-version'], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        raise RuntimeError("ffmpeg и ffprobe должны быть установлены в системе")
+
+
 async def main():
+    # Проверяем зависимости
+    check_dependencies()
+    
     asyncio.create_task(task_worker())
     await dp.start_polling(bot, skip_updates=True)
 
