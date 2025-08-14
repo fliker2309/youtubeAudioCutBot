@@ -31,7 +31,7 @@ if not config_path.exists():
 with open(config_path, encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 
-TOKEN = cfg["telegram_token"]
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 SEGMENT_MS = cfg.get("segment_length_ms", 10 * 60 * 1000)
 SEGMENT_S = SEGMENT_MS // 1000
 SPEED_OPTIONS = cfg.get("speed_options", [1.0, 1.25, 1.5, 1.75, 2.0])
