@@ -40,6 +40,10 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 executor = ThreadPoolExecutor(max_workers=4)  # Возвращаем к стандартному значению
 
+cookies_raw = os.getenv("COOKIES_TXT")
+with open("cookies.txt", "w", encoding="utf-8") as f:
+    f.write(cookies_raw)
+
 task_queue: asyncio.Queue[tuple[str, int, int, float]] = asyncio.Queue(maxsize=10)
 pending_videos: dict[int, deque[tuple[str, int, int]]] = {}
 progress_data: dict[int, tuple[float, int]] = {}
