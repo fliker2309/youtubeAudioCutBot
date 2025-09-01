@@ -10,13 +10,15 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 import time
 import threading
+import uuid
+import glob
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
 import yt_dlp
 
-# --- Настройка логирования ---
+# --- Логирование ---
 logging.basicConfig(
     level=logging.INFO,
     filename='bot.log',
@@ -31,15 +33,27 @@ if not config_path.exists():
 with open(config_path, encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 
-TOKEN = cfg["telegram_token"]
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 SEGMENT_MS = cfg.get("segment_length_ms", 10 * 60 * 1000)
 SEGMENT_S = SEGMENT_MS // 1000
 SPEED_OPTIONS = cfg.get("speed_options", [1.0, 1.25, 1.5, 1.75, 2.0])
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-executor = ThreadPoolExecutor(max_workers=4)  # Возвращаем к стандартному значению
+executor = ThreadPoolExecutor(max_workers=4)
 
+# --- Cookies ---
+def write_netscape_cookie_file(raw_cookie: str, filename: str = "cookies.txt"):
+    with open(filename, "w", encoding="utf-8") as f:
+        for pair in raw_cookie.split(";"):
+            if "=" in pair:
+                name, value = pair.strip().split("=", 1)
+                f.write(f".youtube.com\tTRUE\t/\tFALSE\t0\t{name}\t{value}\n")
+
+cookies_raw = os.getenv("COOKIES_TXT")
+write_netscape_cookie_file(cookies_raw)
+
+# --- Очереди и состояния ---
 task_queue: asyncio.Queue[tuple[str, int, int, float]] = asyncio.Queue(maxsize=10)
 pending_videos: dict[int, deque[tuple[str, int, int]]] = {}
 progress_data: dict[int, tuple[float, int]] = {}
@@ -47,20 +61,13 @@ message_ids: dict[int, list[int]] = {}
 active_tasks_lock = threading.Lock()
 active_tasks: int = 0
 
-
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:<>|\"]', "-", name)
 
-
 def cleanup_temp_files():
-    """Очищает временные файлы yt-dlp"""
-    import glob
     temp_patterns = [
-        'input_*.mp4',
-        'input_*.webm', 
-        'input_*.m4a',
-        'input_*.part*',
-        'input_*.frag*'
+        'input_*.mp4', 'input_*.webm', 'input_*.m4a',
+        'input_*.part*', 'input_*.frag*'
     ]
     for pattern in temp_patterns:
         for file_path in glob.glob(pattern):
@@ -70,7 +77,6 @@ def cleanup_temp_files():
                     logger.info(f"Удален временный файл: {file_path}")
             except Exception as e:
                 logger.warning(f"Не удалось удалить временный файл {file_path}: {e}")
-
 
 def speed_keyboard() -> types.InlineKeyboardMarkup:
     rows, row = [], []
@@ -83,16 +89,13 @@ def speed_keyboard() -> types.InlineKeyboardMarkup:
         rows.append(row)
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
-
 def create_progress_bar(percent: float) -> str:
     filled = int(percent // 10)
     return f"{'█' * filled}{'░' * (10 - filled)} {percent:.1f}%"
 
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer("Привет! Пришли ссылку на YouTube, выбери скорость — я поставлю задачу в очередь.")
-
 
 @dp.message(lambda m: 'youtube.com' in m.text or 'youtu.be' in m.text)
 async def handle_link(message: types.Message):
@@ -102,7 +105,6 @@ async def handle_link(message: types.Message):
         reply_markup=speed_keyboard()
     )
     dq.append((message.text.strip(), message.message_id, speed_msg.message_id))
-
 
 @dp.callback_query(lambda c: c.data.startswith("speed:"))
 async def handle_speed(cb: types.CallbackQuery):
@@ -127,7 +129,6 @@ async def handle_speed(cb: types.CallbackQuery):
         await cb.message.answer("Очередь переполнена, попробуй позже.")
     await cb.answer()
 
-
 async def edit_progress_message(chat_id: int, message_id: int, text: str):
     try:
         await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id)
@@ -135,7 +136,6 @@ async def edit_progress_message(chat_id: int, message_id: int, text: str):
         logger.error(f"Ошибка редактирования сообщения: {e}")
         msg = await bot.send_message(chat_id=chat_id, text=text)
         progress_data[chat_id] = (progress_data[chat_id][0], msg.message_id)
-
 
 def download_progress_hook(d, chat_id, loop):
     if d['status'] == 'downloading':
@@ -154,7 +154,6 @@ def download_progress_hook(d, chat_id, loop):
             else:
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(
                     edit_progress_message(chat_id, message_id, text)))
-
 
 async def task_worker():
     global active_tasks
