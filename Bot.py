@@ -18,7 +18,7 @@ from aiogram.filters import Command
 from aiogram.types import FSInputFile
 import yt_dlp
 
-# --- Логирование ---
+
 logging.basicConfig(
     level=logging.INFO,
     filename='bot.log',
@@ -34,7 +34,6 @@ with open(config_path, encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 
 TOKEN = cfg.get("telegram_token")
-# --- TOKEN = "7828398845:AAFhNph7fQ6HkrCcCzSMWz8G6tmgRBA4VAk"
 SEGMENT_MS = cfg.get("segment_length_ms", 10 * 60 * 1000)
 SEGMENT_S = SEGMENT_MS // 1000
 SPEED_OPTIONS = cfg.get("speed_options", [1.0, 1.25, 1.5, 1.75, 2.0])
@@ -42,17 +41,6 @@ SPEED_OPTIONS = cfg.get("speed_options", [1.0, 1.25, 1.5, 1.75, 2.0])
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 executor = ThreadPoolExecutor(max_workers=4)
-
-# --- Cookies ---
-# def write_netscape_cookie_file(raw_cookie: str, filename: str = "cookies.txt"):
-#     with open(filename, "w", encoding="utf-8") as f:
-#         for pair in raw_cookie.split(";"):
-#             if "=" in pair:
-#                 name, value = pair.strip().split("=", 1)
-#                 f.write(f".youtube.com\tTRUE\t/\tFALSE\t0\t{name}\t{value}\n")
-
-# cookies_raw = os.getenv("COOKIES_TXT")
-# write_netscape_cookie_file(cookies_raw)
 
 # --- Очереди и состояния ---
 task_queue: asyncio.Queue[tuple[str, int, int, float]] = asyncio.Queue(maxsize=10)
@@ -104,8 +92,6 @@ def speed_keyboard() -> types.InlineKeyboardMarkup:
         rows.append(row)
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
-# Функция create_progress_bar удалена (прогресс загрузки отключен)
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
@@ -147,8 +133,6 @@ async def handle_speed(cb: types.CallbackQuery):
     except asyncio.QueueFull:
         await cb.message.answer("Очередь переполнена, попробуй позже.")
     await cb.answer()
-
-# Функции прогресса загрузки удалены для избежания таймаутов
 
 async def task_worker():
     global active_tasks
