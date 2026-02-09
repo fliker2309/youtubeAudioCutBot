@@ -2,3 +2,4 @@ bot.log
 config.yaml
 .github
 __pycache__
+tmp/
