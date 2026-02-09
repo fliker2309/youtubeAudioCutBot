@@ -5,7 +5,7 @@ builder = "nixpacks"
 PYTHONUNBUFFERED = "1"
 
 [phases.setup]
-nixPkgs = ["python3", "gcc", "ffmpeg"]
+nixPkgs = ["python3", "gcc", "ffmpeg", "nodejs"]
 
 [phases.install]
 cmds = [
