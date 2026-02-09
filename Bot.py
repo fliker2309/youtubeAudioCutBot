@@ -3,6 +3,7 @@ import re
 import asyncio
 import math
 import subprocess
+import shutil
 from pathlib import Path
 from collections import deque
 import yaml
@@ -19,11 +20,12 @@ from aiogram.types import FSInputFile
 import yt_dlp
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    filename='bot.log',
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Логи в UTF-8, чтобы на Windows не было кракозябр
+_log_fmt = '%(asctime)s - %(levelname)s - %(message)s'
+_handler = logging.FileHandler('bot.log', encoding='utf-8')
+_handler.setFormatter(logging.Formatter(_log_fmt))
+logging.root.addHandler(_handler)
+logging.root.setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Конфиг ---
@@ -37,6 +39,11 @@ TOKEN = cfg.get("telegram_token")
 SEGMENT_MS = cfg.get("segment_length_ms", 10 * 60 * 1000)
 SEGMENT_S = SEGMENT_MS // 1000
 SPEED_OPTIONS = cfg.get("speed_options", [1.0, 1.25, 1.5, 1.75, 2.0])
+# Папка для временных файлов по задачам; подпапка на каждую задачу
+TMP_DIR = Path(__file__).parent / "tmp"
+# YouTube: клиенты без PO Token (см. PO Token Guide). Можно переопределить в config.yaml
+DEFAULT_YOUTUBE_PLAYER_CLIENTS = ['tv', 'tv_simply', 'tv_embedded', 'web_embedded', 'android_vr']
+YOUTUBE_PLAYER_CLIENTS = cfg.get("youtube_player_clients") or DEFAULT_YOUTUBE_PLAYER_CLIENTS
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -51,48 +58,35 @@ active_tasks: int = 0
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:<>|\"]', "-", name)
 
-def cleanup_temp_files():
-    """Очищает все временные файлы"""
+def cleanup_work_dir(work_dir: Path) -> None:
+    """Удаляет папку задачи со всем содержимым."""
+    if not work_dir or not work_dir.exists():
+        return
+    try:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        logger.info(f"Удалена папка задачи: {work_dir}")
+    except Exception as e:
+        logger.warning(f"Не удалось удалить папку {work_dir}: {e}")
+
+def cleanup_legacy_temp_files():
+    """Очищает старые временные файлы в корне проекта (на случай остатков до перехода на tmp/)."""
     temp_patterns = [
         'input_*.mp4', 'input_*.webm', 'input_*.m4a', 'input_*.mp3',
         'input_*.part*', 'input_*.frag*', 'input_*.ytdl', 'input_*.info.json',
-        'input_*.temp*', 'input_*.tmp*',
+        'input_*.temp*', 'input_*.tmp*', '*__*.mp3',
     ]
+    base = Path(__file__).parent
     cleaned_count = 0
     for pattern in temp_patterns:
-        for file_path in glob.glob(pattern):
+        for file_path in base.glob(pattern):
             try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+                if file_path.is_file():
+                    file_path.unlink()
                     cleaned_count += 1
-                    logger.info(f"Удален временный файл: {file_path}")
             except Exception as e:
-                logger.warning(f"Не удалось удалить временный файл {file_path}: {e}")
+                logger.warning(f"Не удалось удалить {file_path}: {e}")
     if cleaned_count > 0:
-        logger.info(f"Очищено {cleaned_count} временных файлов")
-
-def cleanup_download_artifacts(downloaded_path: str):
-    """Удаляет скачанный файл и связанные артефакты yt-dlp (.part/.ytdl/.json)."""
-    try:
-        p = Path(downloaded_path)
-        base = str(p.with_suffix(''))  # без расширения
-        patterns = [
-            str(p),
-            base + ".*",
-            str(p) + ".part*",
-            base + ".*.part*",
-            base + ".ytdl",
-            base + ".info.json",
-        ]
-        for pat in patterns:
-            for fp in glob.glob(pat):
-                try:
-                    if os.path.exists(fp):
-                        os.remove(fp)
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить артефакт {fp}: {e}")
-    except Exception as e:
-        logger.warning(f"Ошибка cleanup_download_artifacts: {e}")
+        logger.info(f"Очищено {cleaned_count} старых временных файлов")
 
 def clear_logs():
     """Очищает файл логов после успешной обработки (без повторной записи в него)."""
@@ -166,6 +160,29 @@ async def handle_speed(cb: types.CallbackQuery):
         await cb.message.answer("Очередь переполнена, попробуй позже.")
     await cb.answer()
 
+def _user_friendly_download_error(exc: Exception) -> str:
+    """Превращает ошибку yt-dlp в понятное сообщение для пользователя."""
+    err = str(exc).lower()
+    if "403" in err or "forbidden" in err:
+        return (
+            "❌ Доступ к видео запрещён (403).\n\n"
+            "Часто помогает добавление cookies в config.yaml:\n"
+            "• youtube_cookiefile: \"cookies.txt\"\n"
+            "или\n"
+            "• youtube_cookies_from_browser: \"firefox\"\n\n"
+            "Подробнее: https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
+        )
+    if "geographic" in err or "not available in your country" in err or "region" in err or "blocked" in err:
+        return "❌ Видео недоступно в вашем регионе. Использование VPN или cookies может помочь."
+    if "drm" in err or "protected" in err or "encrypted" in err:
+        return "❌ Видео защищено DRM — скачать нельзя."
+    if "age" in err or "sign in" in err or "login" in err or "restricted" in err:
+        return "❌ Нужна авторизация (cookies с залогиненным YouTube) или видео только для взрослых."
+    if "private" in err or "unavailable" in err:
+        return "❌ Видео недоступно (приватное, удалено или ограничено)."
+    return f"❌ Не удалось загрузить видео:\n{exc}"
+
+
 async def task_worker():
     global active_tasks
     logger.info("Task worker запущен")
@@ -178,18 +195,21 @@ async def task_worker():
             active_tasks += 1
         logger.info(f"Активных задач: {active_tasks}")
 
+        work_dir = TMP_DIR / uuid.uuid4().hex[:12]
+        work_dir.mkdir(parents=True, exist_ok=True)
         try:
             # Пересылаем оригинальное сообщение
             logger.info(f"Пересылаем оригинальное сообщение в чат {chat_id}")
             await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=orig_msg_id)
             
-            # Обрабатываем видео
+            # Обрабатываем видео (все файлы — в work_dir)
             logger.info(f"Начинаем обработку видео для чата {chat_id}")
-            await process_video(url, chat_id, orig_msg_id, speed)
+            await process_video(url, chat_id, orig_msg_id, speed, work_dir)
             logger.info(f"Обработка видео завершена для чата {chat_id}")
             
         except Exception as e:
-            error_msg = f"❌ Ошибка при обработке видео:\n{str(e)}"
+            msg = str(e).strip()
+            error_msg = msg if msg.startswith("❌") else f"❌ Ошибка при обработке видео:\n{msg}"
             await bot.send_message(chat_id=chat_id, text=error_msg)
             logger.error(f"Ошибка обработки видео {url}: {e}")
                 
@@ -197,7 +217,7 @@ async def task_worker():
             task_queue.task_done()
             with active_tasks_lock:
                 active_tasks -= 1
-            cleanup_temp_files()
+            cleanup_work_dir(work_dir)
 
 
 def process_segment(input_file: str, start: float, duration: float, filter_str: str, output_file: str):
@@ -213,37 +233,35 @@ def process_segment(input_file: str, start: float, duration: float, filter_str: 
         return subprocess.run(cmd, check=True, capture_output=True)
 
 
-async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: float):
+async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: float, work_dir: Path):
     logger.info(f"process_video вызвана: URL={video_url[:50]}..., chat_id={chat_id}, speed={speed}")
     loop = asyncio.get_event_loop()
 
     def blocking_download():
         try:
             logger.info(f"Начинаем загрузку видео: {video_url[:50]}...")
-            # Создаем уникальное имя файла для каждого процесса
-            import uuid
-            unique_id = str(uuid.uuid4())[:8]
-            filename_template = f'input_{unique_id}.%(ext)s'
-            logger.info(f"Создан шаблон имени файла: {filename_template}")
+            # Все файлы задачи — в папке work_dir
+            filename_template = str(work_dir / 'input.%(ext)s')
+            logger.info(f"Шаблон имени файла: {filename_template}")
             
             opts = {
-                'format': 'bestaudio/best',  # Возвращаем лучшее качество
+                'format': 'bestaudio/best',
                 'outtmpl': filename_template,
                 'quiet': True,
                 'no-playlist': True,
-                'noprogress': True,  # Отключаем прогресс-бар yt-dlp
-                'retries': 5,  # Увеличиваем количество попыток
-                'fragment_retries': 5,  # Попытки для фрагментов
-                'file_access_retries': 5,  # Попытки доступа к файлу
-                'sleep_interval': 1,  # Пауза между попытками
-                'max_sleep_interval': 5,  # Максимальная пауза
-                'ignoreerrors': False,  # Не игнорируем ошибки
-                'no_warnings': False,  # Показываем предупреждения
-                # YouTube: используем только клиенты БЕЗ PO Token (см. PO Token Guide / issue 12482).
-                # android/ios/web требуют GVS PO Token или дают только SABR без URL → 403.
+                'noprogress': True,
+                'retries': 5,
+                'fragment_retries': 5,
+                'file_access_retries': 5,
+                'sleep_interval': 1,
+                'max_sleep_interval': 5,
+                'ignoreerrors': False,
+                'no_warnings': False,
+                # Один поток загрузки фрагментов — стабильнее, меньше шанс блокировки
+                'concurrent_fragment_downloads': 1,
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['tv', 'tv_simply', 'tv_embedded', 'web_embedded', 'android_vr'],
+                        'player_client': YOUTUBE_PLAYER_CLIENTS,
                     }
                 },
                 'http_headers': {
@@ -295,7 +313,7 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
                 return path, safe_title
         except Exception as e:
             logger.error(f"Ошибка загрузки видео {video_url}: {e}")
-            raise Exception(f"Не удалось загрузить видео: {e}")
+            raise Exception(_user_friendly_download_error(e))
         except UnicodeDecodeError as e:
             logger.error(f"Ошибка кодировки при загрузке видео {video_url}: {e}")
             raise Exception(f"Ошибка кодировки при загрузке видео: {e}")
@@ -337,23 +355,20 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
     for i in range(total_segments):
         start = i * segment_in_s
         segment_num = f"{i+1:02d}"
-        out_name = f"{segment_num}__{title_safe}.mp3"
-        logger.info(f"Обрабатываем сегмент {i+1}/{total_segments}: {out_name}")
+        out_path = work_dir / f"{segment_num}__{title_safe}.mp3"
+        logger.info(f"Обрабатываем сегмент {i+1}/{total_segments}: {out_path.name}")
         
-        # Исправляем проблему с lambda - создаем отдельную функцию
         try:
-            logger.info(f"Запускаем обработку сегмента {i+1} в отдельном потоке...")
             await loop.run_in_executor(
-                executor, 
-                process_segment, 
-                input_file, 
-                start, 
-                segment_in_s, 
-                filter_str, 
-                out_name
+                executor,
+                process_segment,
+                input_file,
+                start,
+                segment_in_s,
+                filter_str,
+                str(out_path),
             )
-            logger.info(f"Сегмент {i+1} обработан, отправляем в чат...")
-            await bot.send_audio(chat_id=chat_id, audio=FSInputFile(out_name))
+            await bot.send_audio(chat_id=chat_id, audio=FSInputFile(str(out_path)))
             logger.info(f"Сегмент {i+1} отправлен в чат {chat_id}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Ошибка обработки сегмента {i+1}: {e}")
@@ -370,16 +385,13 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
             failed_segments += 1
             raise
         finally:
-            # Удаляем файл сегмента
-            if os.path.exists(out_name):
+            if out_path.exists():
                 try:
-                    os.remove(out_name)
+                    out_path.unlink()
                 except Exception as e:
-                    logger.error(f"Не удалось удалить сегмент {out_name}: {e}")
+                    logger.error(f"Не удалось удалить сегмент {out_path}: {e}")
 
-    # Всегда чистим скачанные артефакты
-    cleanup_download_artifacts(input_file)
-    cleanup_temp_files()
+    # Папку work_dir удалит task_worker в finally
 
     if failed_segments == 0:
         await bot.send_message(chat_id=chat_id, text="Готово!")
@@ -408,9 +420,12 @@ async def main():
     check_dependencies()
     logger.info("Зависимости проверены успешно")
     
-    # Очищаем старые временные файлы при запуске
-    logger.info("Очищаем временные файлы...")
-    cleanup_temp_files()
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("Очищаем старые временные файлы...")
+    cleanup_legacy_temp_files()
+    for stale in TMP_DIR.iterdir():
+        if stale.is_dir():
+            cleanup_work_dir(stale)
     
     # Создаем один воркер для последовательной обработки
     logger.info("Создаем task worker...")
@@ -421,8 +436,10 @@ async def main():
         await dp.start_polling(bot, skip_updates=True)
     except KeyboardInterrupt:
         logger.info("Получен сигнал прерывания...")
-        # Очищаем временные файлы при завершении
-        cleanup_temp_files()
+        cleanup_legacy_temp_files()
+        for stale in TMP_DIR.iterdir():
+            if stale.is_dir():
+                cleanup_work_dir(stale)
         logger.info("Бот остановлен")
 
 

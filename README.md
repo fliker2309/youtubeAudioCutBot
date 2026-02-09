@@ -29,24 +29,26 @@ A Telegram bot that downloads audio from YouTube videos, speeds it up on request
 3. **Install FFmpeg**  
    Make sure `ffmpeg` and `ffprobe` are available in your system `PATH`.
 
+4. **Configure the bot** by editing `config.yaml`:
+   ```yaml
+   telegram_token: "your_bot_token_here"
+   segment_length_ms: 600000  # 10 minutes in milliseconds
+   speed_options: [1.0, 1.25, 1.5, 1.75, 2.0]
+   # Опционально — клиенты YouTube (без PO Token). По умолчанию: tv, tv_simply, tv_embedded, web_embedded, android_vr
+   # youtube_player_clients: [tv, tv_simply, tv_embedded, web_embedded, android_vr]
+   # При 403 можно добавить cookies: youtube_cookiefile: "cookies.txt" или youtube_cookies_from_browser: "firefox"
    ```
-4. Configure the bot by editing `config.yaml`:
-    ```yaml
-    telegram_token: "your_bot_token_here"
-    segment_length_ms: 600000  # 10 minutes in milliseconds
-    speed_options: [1.0, 1.25, 1.5, 1.75, 2.0]
-    ```
-=======
+
 5. **Run the bot**:
    ```bash
-   python bot.py
+   python Bot.py
    ```
+
 ---
 
 ## 🧠 Usage
 
-
-2. **In Telegram**:
+1. **In Telegram**:
    - Send `/start` to the bot
    - Paste a YouTube URL
    - Choose speed from the inline buttons
