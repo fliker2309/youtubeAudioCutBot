@@ -239,14 +239,45 @@ async def process_video(video_url: str, chat_id: int, orig_msg_id: int, speed: f
                 'max_sleep_interval': 5,  # Максимальная пауза
                 'ignoreerrors': False,  # Не игнорируем ошибки
                 'no_warnings': False,  # Показываем предупреждения
-                # YouTube: уменьшаем проблемы с SABR/JS runtime и часть 403
-                'extractor_args': {'youtube': {'player_client': ['default']}},
+                # YouTube: используем только клиенты БЕЗ PO Token (см. PO Token Guide / issue 12482).
+                # android/ios/web требуют GVS PO Token или дают только SABR без URL → 403.
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['tv', 'tv_simply', 'tv_embedded', 'web_embedded', 'android_vr'],
+                    }
+                },
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 },
                 'socket_timeout': 30,
             }
+
+            # Если задан PO Token (см. issue 12482/PO Token Guide) — используем
+            youtube_po_token = cfg.get("youtube_po_token")
+            if youtube_po_token:
+                try:
+                    opts['extractor_args']['youtube']['po_token'] = [str(youtube_po_token)]
+                except Exception:
+                    pass
+
+            # Если хотим включить форматы без PO Token (может привести к 403, но иногда помогает)
+            if cfg.get("youtube_formats_missing_pot"):
+                try:
+                    opts['extractor_args']['youtube']['formats'] = ['missing_pot']
+                except Exception:
+                    pass
+
+            # Cookies (часто критично против 403): либо cookiefile, либо cookies_from_browser
+            cookiefile = cfg.get("youtube_cookiefile")
+            if cookiefile:
+                opts["cookiefile"] = str(cookiefile)
+
+            cookies_from_browser = cfg.get("youtube_cookies_from_browser")
+            if cookies_from_browser:
+                # формат: "firefox" или "chrome", опционально можно передать как список в config
+                opts["cookiesfrombrowser"] = cookies_from_browser
+
             with yt_dlp.YoutubeDL(opts) as ydl:
                 logger.info("Создан экземпляр YoutubeDL, начинаем извлечение информации...")
                 info = ydl.extract_info(video_url, download=True)
